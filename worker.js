@@ -48,12 +48,24 @@ export default {
       }
     }
 
-    // models: static catalog (upstream has no /v1/models)
+    // models: fetch live catalog from /client-version (falls back to static list)
     if (url.pathname === '/v1/models') {
-      return Response.json({
-        object: 'list',
-        data: [{ id: 'deepseek/deepseek-v4-flash', object: 'model', owned_by: 'freepi' }],
-      }, { headers: cors });
+      let list = null;
+      try {
+        const cv = await fetch('https://api.freepi.ai/client-version', {
+          headers: { 'Authorization': 'Bearer ' + env.FREEPI_TOKEN },
+        });
+        if (cv.ok) {
+          const d = await cv.json();
+          if (Array.isArray(d.models)) {
+            list = d.models
+              .filter((m) => !m.unavailable)
+              .map((m) => ({ id: m.id, object: 'model', owned_by: m.section === 'defense' ? 'freepi-defense' : 'freepi' }));
+          }
+        }
+      } catch {}
+      if (!list) list = [{ id: 'deepseek-v4-flash', object: 'model', owned_by: 'freepi' }];
+      return Response.json({ object: 'list', data: list }, { headers: cors });
     }
 
     // usage passthrough from /me
@@ -84,9 +96,10 @@ export default {
       } catch {
         return Response.json({ error: { message: 'invalid JSON body', code: 'bad_request' } }, { status: 400, headers: cors });
       }
-      // model param lands on deepseek server-side anyway; keep requested id in response
-      const requestedModel = body.model || 'deepseek/deepseek-v4-flash';
-      body.model = 'deepseek/deepseek-v4-flash';
+      // forward requested model id (catalog: particle, deepseek-v4.1-flash, glm-5.3-flash,
+      // gpt-6-luna, deepseek-v4-pro, gpt-oss-120b-speed, solar-pro-4, defense models, ...).
+      // Unknown ids land on deepseek-v4-flash server-side. Keep requested id for response display.
+      const requestedModel = body.model || 'deepseek-v4-flash';
 
       let upstream;
       try {
@@ -128,7 +141,11 @@ export default {
       let data;
       try { data = JSON.parse(text); } catch { data = { raw: text.slice(0, 2000) }; }
       // keep caller's requested model name in the response for client display
-      if (data && data.model) data.model = requestedModel;
+      if (data && data.model && data.model !== 'deepseek-v4-flash') {
+        // upstream already echoes the real served model id (e.g. deepseek-v4-pro); leave it
+      } else if (data && data.model) {
+        data.model = requestedModel;
+      }
       return new Response(JSON.stringify(data), {
         status: upstream.status,
         headers: { ...cors, 'Content-Type': 'application/json' },
