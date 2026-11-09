@@ -31,7 +31,8 @@ api.freepi.ai/v1/chat/completions
 | Secret | 说明 | 获取方式 |
 |--------|------|----------|
 | `FREEPI_TOKEN` | freepi.ai 的 JWT，90 天有效 | 见下方「获取 token」 |
-| `FREEPI_TOKEN_ALT` | 可选，第二个账号的 JWT（token 池，409/429 时自动切号） | 同上，用另一个账号走一遍 |
+| `FREEPI_TOKEN_ALT` | 可选，第二个账号的 JWT（两号写法，等价于 `FREEPI_TOKENS` 的第二项） | 同上，用另一个账号走一遍 |
+| `FREEPI_TOKENS` | 可选，**多号写法**：一个 secret 装下全部账号，换行/逗号/空格分隔，或 JSON 数组 `["jwt1","jwt2"]`。扩号只改这一个 secret，不用动代码 | 同上，每个号走一遍 |
 | `WORKER_API_KEY` | 客户端访问本 Worker 的密钥 | 自定义任意字符串 |
 
 `wrangler.toml` 不含任何密钥，可直接入库。
@@ -91,7 +92,11 @@ npx wrangler tail
 
 ### 「concurrent」429 / 「concurrent_session」409 怎么办
 
-上游限制同账号同时只能 1 个请求（`code: concurrent`，HTTP 429），账号最多 4 个 CLI 会话坑（`code: concurrent_session`，HTTP **409 或 429**，占满 30 分钟才自动释放）。Worker 对 `concurrent_session` 会自动调 `/session/reset` 释放并重试一次（实测占坑期间请求全部自愈）；配置了 `FREEPI_TOKEN_ALT` 时先直接切备用号再 reset，几乎无感。普通 `concurrent`（真单并发撞车）需客户端自行排队/重试。
+上游限制同账号同时只能 1 个请求（`code: concurrent`，HTTP 429），账号最多 4 个 CLI 会话坑（`code: concurrent_session`，HTTP **409 或 429**，占满 30 分钟才自动释放）。Worker 对 `concurrent_session` 会自动调 `/session/reset` 释放并重试一次（实测占坑期间请求全部自愈）。
+
+**号池按顺序走**：每个号先打一次广告曝光再发请求，撞到账号级门（`ads_required` 广告停摆 / `hourly_ceiling` 小时上限 / `credits_exhausted` 额度耗尽）就换下一个号，全池走完才把错误抛给客户端。配多个号的唯一目的就是扛 `hourly_ceiling`——它按小时计，广告怎么刷都解不开，只能靠另一个号顶。`/v1/usage` 会列出池里每个号的现状（`accounts[]`、`pool_size`）。
+
+**扩号**：把新 JWT 追加进 `FREEPI_TOKENS`（换行分隔即可），重新 `wrangler secret put`，无需改代码、无需改配置。
 
 ### 「ads_required」403 怎么办
 

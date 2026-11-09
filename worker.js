@@ -36,7 +36,7 @@ export default {
     const protectedPaths = ['/v1/chat/completions', '/v1/models', '/v1/usage'];
     if (protectedPaths.includes(url.pathname)) {
       const key = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
-      if (!env.WORKER_API_KEY || !env.FREEPI_TOKEN) {
+      if (!env.WORKER_API_KEY || !poolOf(env).length) {
         return Response.json({ error: { message: 'service misconfigured', code: 'config_error' } }, { status: 500, headers: cors });
       }
       // constant-time compare
@@ -53,7 +53,7 @@ export default {
       let list = null;
       try {
         const cv = await fetch('https://api.freepi.ai/client-version', {
-          headers: { 'Authorization': 'Bearer ' + env.FREEPI_TOKEN },
+          headers: { 'Authorization': 'Bearer ' + poolOf(env)[0] },
         });
         if (cv.ok) {
           const d = await cv.json();
@@ -68,10 +68,10 @@ export default {
       return Response.json({ object: 'list', data: list }, { headers: cors });
     }
 
-    // usage passthrough from /me; with a token pool every account reports
-    // its own row, so one hitting its hourly ceiling stays visible
+    // usage passthrough from /me; every account in the pool reports its own
+    // row, so one hitting its hourly ceiling stays visible
     if (url.pathname === '/v1/usage') {
-      const tokens = [env.FREEPI_TOKEN, env.FREEPI_TOKEN_ALT].filter(Boolean);
+      const tokens = poolOf(env);
       const rows = await Promise.all(tokens.map(async (token) => {
         try {
           const me = await fetch('https://api.freepi.ai/me', { headers: freepiHeaders(token) });
@@ -92,9 +92,15 @@ export default {
       if (!rows.length) {
         return Response.json({ error: { message: 'no token configured', code: 'upstream_error' } }, { status: 502, headers: cors });
       }
-      // primary stays the top-level shape; the pool rides along
+      // primary keeps the top-level shape; every account rides in accounts[]
       const [primary, ...rest] = rows;
-      return Response.json({ ...primary, accounts: rows, primary: rows[0], pool_size: rows.length, ...(rest.length ? { alt: rest[0] } : {}) }, { headers: cors });
+      return Response.json({
+        ...primary,
+        accounts: rows,
+        primary: rows[0],
+        pool_size: rows.length,
+        ...(rest.length ? { alt: rest[0] } : {}),
+      }, { headers: cors });
     }
 
     // chat completions → upstream
@@ -115,7 +121,7 @@ export default {
       // an account-level gate (ads paused, hourly ceiling, credits gone)
       // hands the request to the next account instead of ending it
       let upstream;
-      const tokens = [env.FREEPI_TOKEN, env.FREEPI_TOKEN_ALT].filter(Boolean);
+      const tokens = poolOf(env);
       try {
         upstream = await chatAcrossPool(tokens, body);
       } catch (err) {
@@ -150,12 +156,44 @@ export default {
 };
 
 function freepiHeaders(token) {
-  if (!token) throw new Error('FREEPI_TOKEN not set');
+  if (!token) throw new Error('no free-pi token in the pool');
   return {
     'Authorization': 'Bearer ' + token,
     'x-session-id': sessionId(),
     'x-client-version': '0.6.15',
   };
+}
+
+// The account pool. FREEPI_TOKENS is the list form — one secret holding
+// every account, newline/comma/space separated, or a JSON array — so
+// growing the pool never means touching this file again. FREEPI_TOKEN and
+// FREEPI_TOKEN_ALT stay supported as the two-account shape.
+function poolOf(env) {
+  const out = [];
+  const add = (value) => {
+    if (!value) return;
+    const text = String(value).trim();
+    if (!text) return;
+    let parts;
+    if (text.startsWith('[')) {
+      try {
+        parts = JSON.parse(text);
+        if (!Array.isArray(parts)) parts = [text];
+      } catch {
+        parts = text.split(/[\s,]+/);
+      }
+    } else {
+      parts = text.split(/[\s,]+/);
+    }
+    for (const part of parts) {
+      const token = String(part).trim().replace(/^["']|["']$/g, '');
+      if (token && !out.includes(token)) out.push(token);
+    }
+  };
+  add(env.FREEPI_TOKENS);
+  add(env.FREEPI_TOKEN);
+  add(env.FREEPI_TOKEN_ALT);
+  return out;
 }
 
 function chatFetch(token, body) {
