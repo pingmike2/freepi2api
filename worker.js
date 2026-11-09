@@ -68,24 +68,33 @@ export default {
       return Response.json({ object: 'list', data: list }, { headers: cors });
     }
 
-    // usage passthrough from /me
+    // usage passthrough from /me; with a token pool every account reports
+    // its own row, so one hitting its hourly ceiling stays visible
     if (url.pathname === '/v1/usage') {
-      let me;
-      try {
-        me = await fetch('https://api.freepi.ai/me', { headers: freepiHeaders(env.FREEPI_TOKEN) });
-      } catch (err) {
-        return Response.json({ error: { message: 'upstream unreachable', code: 'upstream_error' } }, { status: 502, headers: cors });
+      const tokens = [env.FREEPI_TOKEN, env.FREEPI_TOKEN_ALT].filter(Boolean);
+      const rows = await Promise.all(tokens.map(async (token) => {
+        try {
+          const me = await fetch('https://api.freepi.ai/me', { headers: freepiHeaders(token) });
+          const data = await me.json().catch(() => ({}));
+          return {
+            handle: data.handle,
+            remaining_credits_today: data.remaining_credits_today,
+            remaining_usd_today: data.remaining_usd_today,
+            cap_usd_today: data.cap_usd_today,
+            refill_at: data.refill_at,
+            tier: data.tier,
+            raw_status: me.status,
+          };
+        } catch {
+          return { error: 'upstream unreachable' };
+        }
+      }));
+      if (!rows.length) {
+        return Response.json({ error: { message: 'no token configured', code: 'upstream_error' } }, { status: 502, headers: cors });
       }
-      const data = await me.json().catch(() => ({}));
-      return Response.json({
-        remaining_credits_today: data.remaining_credits_today,
-        remaining_usd_today: data.remaining_usd_today,
-        cap_usd_today: data.cap_usd_today,
-        refill_at: data.refill_at,
-        tier: data.tier,
-        handle: data.handle,
-        raw_status: me.status,
-      }, { headers: cors });
+      // primary stays the top-level shape; the pool rides along
+      const [primary, ...rest] = rows;
+      return Response.json({ ...primary, accounts: rows, primary: rows[0], pool_size: rows.length, ...(rest.length ? { alt: rest[0] } : {}) }, { headers: cors });
     }
 
     // chat completions → upstream
@@ -109,12 +118,23 @@ export default {
       const tokens = [env.FREEPI_TOKEN, env.FREEPI_TOKEN_ALT].filter(Boolean);
       try {
         upstream = await sendWithGates(tokens[0], body);
-        if (upstream.status === 403 && tokens.length > 1) {
-          const probe = await upstream.text().catch(() => '');
-          if (probe.includes('ads_required')) {
-            upstream = await sendWithGates(tokens[1], body);
-          } else {
-            upstream = new Response(probe, { status: upstream.status, headers: upstream.headers });
+        // unretryable account gate (ads paused, hourly ceiling): the other
+        // account in the pool may still be free, so hand the request over.
+        // 429/409 session gates are already answered in place above.
+        if (upstream.status === 403 || upstream.status === 429) {
+          if (tokens.length > 1) {
+            const probe = await upstream.text().catch(() => '');
+            const accountGate = probe.includes('ads_required')
+              || probe.includes('hourly_ceiling')
+              || probe.includes('credits_exhausted');
+            if (accountGate) {
+              upstream = await sendWithGates(tokens[1], body);
+            } else {
+              upstream = new Response(probe, { status: upstream.status, headers: upstream.headers });
+            }
+          } else if (upstream.status === 403) {
+            // single account: surface the gate as the other account's pool
+            // would have been the only help; the message already explains it
           }
         }
       } catch (err) {
