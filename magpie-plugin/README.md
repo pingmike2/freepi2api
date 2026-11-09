@@ -1,5 +1,9 @@
 # freepi2api magpie plugin — FreePI (freepi.ai) provider
 
+> **插件已迁到独立仓库：[pingmike2/freepi-magpie-plugin](https://github.com/pingmike2/freepi-magpie-plugin)** —
+> 用 `magpie plugin add github:pingmike2/freepi-magpie-plugin` 安装可收一键更新
+> （本目录是源码镜像，不再随 release 发版）。
+
 [magpie](https://usemagpie.ai) / OpenCode provider plugin that turns your
 own FreePI account's free daily credits into a provider every agent can
 use — the same upstream this repo's Cloudflare Worker proxies, but running
