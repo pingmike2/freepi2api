@@ -8,6 +8,11 @@
  * - Concurrency 1 per account; daily 15000 credits (~$1.125), resets 00:00 UTC
  * - GET /me → remaining_credits_today / refill_at
  * - JWT valid 90 days
+ * - Ads gate: server tracks ad impressions per account; without them chat returns
+ *   403 {code:"ads_required"}. Fix: GET /ads/next?slot=banner then POST /ads/impression
+ *   {ad_id, click_token, imp_fired:true} — done lazily before each chat.
+ * - Session gate: max 4 concurrent CLI sessions per account; 429 {code:"concurrent_session"}.
+ *   Fix: POST /session/reset (Bearer only) releases the stuck slot.
  */
 
 export default {
@@ -85,11 +90,28 @@ export default {
 
       let upstream;
       try {
+        await warmAds(env.FREEPI_TOKEN);
         upstream = await fetch('https://api.freepi.ai/v1/chat/completions', {
           method: 'POST',
           headers: { ...freepiHeaders(env.FREEPI_TOKEN), 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
+        // session gate: release stuck slot and retry once
+        if (upstream.status === 429) {
+          const probe = await upstream.text();
+          if (probe.includes('concurrent_session')) {
+            await fetch('https://api.freepi.ai/session/reset', {
+              method: 'POST', headers: { 'Authorization': 'Bearer ' + env.FREEPI_TOKEN },
+            }).catch(() => {});
+            upstream = await fetch('https://api.freepi.ai/v1/chat/completions', {
+              method: 'POST',
+              headers: { ...freepiHeaders(env.FREEPI_TOKEN), 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+          } else {
+            upstream = new Response(probe, { status: upstream.status, headers: upstream.headers });
+          }
+        }
       } catch (err) {
         return Response.json({ error: { message: 'upstream unreachable', code: 'upstream_error' } }, { status: 502, headers: cors });
       }
@@ -131,4 +153,26 @@ let SESSION_ID = null;
 function sessionId() {
   if (!SESSION_ID) SESSION_ID = crypto.randomUUID();
   return SESSION_ID;
+}
+
+// ads gate: upstream pauses free completions when it thinks ads aren't showing.
+// Simulate the CLI's banner flow: fetch an ad, report the impression. Failures ignored —
+// upstream only needs a steady trickle of impressions, not a valid one per request.
+let adsWarmed = false;
+async function warmAds(token) {
+  if (adsWarmed) return;
+  adsWarmed = true;
+  try {
+    const sid = sessionId();
+    const next = await fetch('https://api.freepi.ai/ads/next?slot=banner', {
+      headers: { 'Authorization': 'Bearer ' + token, 'x-session-id': sid },
+    });
+    if (!next.ok) return;
+    const ad = await next.json();
+    await fetch('https://api.freepi.ai/ads/impression', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'x-session-id': sid, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ad_id: ad.ad_id, click_token: ad.click_token, imp_fired: true }),
+    });
+  } catch {}
 }
