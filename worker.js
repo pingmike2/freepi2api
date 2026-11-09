@@ -110,33 +110,14 @@ export default {
       // Unknown ids land on deepseek-v4-flash server-side. Keep requested id for response display.
       const requestedModel = body.model || 'deepseek-v4-flash';
 
-      // token pool: primary + optional alt; per-account ads re-warm; the
-      // ads gate (403 ads_required) re-warms and asks again, then tries
-      // the next account; the session gate (409/429 concurrent_session)
-      // resets the stuck slots and asks again
+      // token pool: walk the accounts in order — each one serves an ad
+      // impression before its chat, answers the session gate in place, and
+      // an account-level gate (ads paused, hourly ceiling, credits gone)
+      // hands the request to the next account instead of ending it
       let upstream;
       const tokens = [env.FREEPI_TOKEN, env.FREEPI_TOKEN_ALT].filter(Boolean);
       try {
-        upstream = await sendWithGates(tokens[0], body);
-        // unretryable account gate (ads paused, hourly ceiling): the other
-        // account in the pool may still be free, so hand the request over.
-        // 429/409 session gates are already answered in place above.
-        if (upstream.status === 403 || upstream.status === 429) {
-          if (tokens.length > 1) {
-            const probe = await upstream.text().catch(() => '');
-            const accountGate = probe.includes('ads_required')
-              || probe.includes('hourly_ceiling')
-              || probe.includes('credits_exhausted');
-            if (accountGate) {
-              upstream = await sendWithGates(tokens[1], body);
-            } else {
-              upstream = new Response(probe, { status: upstream.status, headers: upstream.headers });
-            }
-          } else if (upstream.status === 403) {
-            // single account: surface the gate as the other account's pool
-            // would have been the only help; the message already explains it
-          }
-        }
+        upstream = await chatAcrossPool(tokens, body);
       } catch (err) {
         return Response.json({ error: { message: 'upstream unreachable', code: 'upstream_error' } }, { status: 502, headers: cors });
       }
@@ -193,42 +174,38 @@ function sessionId() {
 }
 
 // ads gate: upstream pauses an account whose ad impressions went stale
-// ("ads aren't showing for this account"), and one fresh impression pair
-// unpauses it at once (verified 2026-11-10: a paused account answered
-// 403 ads_required, then 200 right after one warm). Warm each account on
-// a short interval, and again on the gate itself.
-const ADS_TTL_MS = 4 * 60 * 1000;
-const adsWarmedAt = new Map(); // token -> last warmed at
-async function warmAds(token, force = false) {
-  const at = adsWarmedAt.get(token) ?? 0;
-  if (!force && Date.now() - at < ADS_TTL_MS) return;
+// ("ads aren't showing for this account"). Serving one impression pair
+// unpauses it at once, and the account then stays unpaused for a while
+// (verified 2026-11-10: pause -> one warm -> 200, and the next chats kept
+// answering without another warm). The CLI shows an ad before every
+// foreground chat, so this worker does the same: one impression pair per
+// request per account — that is what keeps the gate from ever tripping.
+async function warmAds(token) {
   try {
     const next = await fetch('https://api.freepi.ai/ads/next?slot=banner', {
       headers: { 'Authorization': 'Bearer ' + token },
     });
-    if (next.ok) {
-      const ad = await next.json();
-      if (ad && ad.ad_id) {
-        await fetch('https://api.freepi.ai/ads/impression', {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ad_id: ad.ad_id, click_token: ad.click_token, imp_fired: true }),
-        });
-      }
-    }
+    if (!next.ok) return;
+    const ad = await next.json();
+    if (!ad || !ad.ad_id) return;
+    await fetch('https://api.freepi.ai/ads/impression', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ad_id: ad.ad_id, click_token: ad.click_token, imp_fired: true }),
+    });
   } catch {}
-  adsWarmedAt.set(token, Date.now());
 }
 
-// one account's chat with the two gates answered in place: the ads gate
-// re-warms and asks once more; the session gate resets and asks once more
+// one account's chat with every gate answered in place: an ad impression
+// before the request, the ads gate re-warming and asking once more, and
+// the session gate resetting and asking once more
 async function sendWithGates(token, body) {
   await warmAds(token);
   let res = await chatFetch(token, body);
   if (res.status === 403) {
     const probe = await res.text();
     if (probe.includes('ads_required')) {
-      await warmAds(token, true);
+      await warmAds(token);
       res = await chatFetch(token, body);
     } else {
       res = new Response(probe, { status: res.status, headers: res.headers });
@@ -246,4 +223,32 @@ async function sendWithGates(token, body) {
     }
   }
   return res;
+}
+
+// the account-level gates that only another account can answer
+const ACCOUNT_GATES = ['ads_required', 'hourly_ceiling', 'credits_exhausted', 'daily_ceiling', 'quota_exhausted'];
+function isAccountGate(text) {
+  return ACCOUNT_GATES.some((gate) => text.includes(gate));
+}
+
+// walk the pool in order: each account gets a warm + chat + in-place gate
+// handling, and an account-level gate passes the request to the next one
+// instead of ending the request
+async function chatAcrossPool(tokens, body) {
+  let last = null;
+  for (const token of tokens) {
+    let res;
+    try {
+      res = await sendWithGates(token, body);
+    } catch {
+      continue; // this account is unreachable; the pool may still answer
+    }
+    if (res.status !== 403 && res.status !== 429) return res;
+    const text = await res.text().catch(() => '');
+    if (!isAccountGate(text)) {
+      return new Response(text, { status: res.status, headers: res.headers });
+    }
+    last = new Response(text, { status: res.status, headers: res.headers });
+  }
+  return last ?? Response.json({ error: { message: 'no token configured', code: 'upstream_error' } }, { status: 502, headers: { ...cors } });
 }

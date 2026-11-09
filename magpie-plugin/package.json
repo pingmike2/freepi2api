@@ -1,6 +1,6 @@
 {
   "name": "opencode-freepi-auth",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "OpenCode provider plugin: FreePI (freepi.ai) — GitHub device sign-in or pasted token, free daily credits with ads warm-up and session-gate retry",
   "type": "module",
   "main": "./index.mjs",

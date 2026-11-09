@@ -81,13 +81,12 @@ function sessionGate(status, text) {
 }
 
 export const FreePIAuthPlugin = async () => {
-  // one ad impression per process, per account: the account's first chat
-  // answers 403 ads_required until it has served one
-  const adsWarmed = new Set()
-
+  // The CLI shows a banner ad before every foreground chat, and that is
+  // what keeps the account's ad window alive: one impression pair before
+  // each request, exactly like the CLI. A paused account answers 403
+  // ads_required until a fresh impression lands, and then stays unpaused
+  // for a while (verified 2026-11-10).
   async function warmAds(token) {
-    if (adsWarmed.has(token)) return
-    adsWarmed.add(token)
     try {
       const next = await fetch(`${ORIGIN}/ads/next?slot=banner`, {
         headers: { authorization: `Bearer ${token}` },
@@ -302,7 +301,6 @@ export const FreePIAuthPlugin = async () => {
               if (res.status !== 403 && res.status !== 409 && res.status !== 429) break
               const text = await res.text()
               if (res.status === 403 && text.includes("ads_required")) {
-                adsWarmed.delete(token)
                 await warmAds(token)
                 res = await fetch(request, {
                   headers: (() => {
