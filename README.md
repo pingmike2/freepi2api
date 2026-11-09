@@ -88,9 +88,9 @@ npx wrangler tail
 
 `*.workers.dev` 在部分地区/ISP 被拦截（TLS 正常但响应 1042）。解决：按上面命令绑自定义域，绑后 1-2 分钟生效。
 
-### 「concurrent」429 怎么办
+### 「concurrent」429 / 「concurrent_session」409 怎么办
 
-上游限制同账号同时只能 1 个请求（`code: concurrent`）。Worker 对 `concurrent_session`（4 个 CLI 会话坑占满）会自动调 `/session/reset` 释放并重试一次；普通 `concurrent` 需客户端自行排队/重试。
+上游限制同账号同时只能 1 个请求（`code: concurrent`，HTTP 429），账号最多 4 个 CLI 会话坑（`code: concurrent_session`，HTTP **409 或 429**，占满 30 分钟才自动释放）。Worker 对 `concurrent_session` 会自动调 `/session/reset` 释放并重试一次（实测占坑期间请求全部自愈）；普通 `concurrent`（真单并发撞车）需客户端自行排队/重试。
 
 ### 「ads_required」403 怎么办
 
@@ -100,7 +100,7 @@ npx wrangler tail
 
 - **只有 deepseek/deepseek-v4-flash 一个模型**：请求里写任何 model 名都会被上游落回这个模型，Worker 会把你请求的 model 名原样回显在响应里（仅显示用途）。
 - **ads_required 门**：上游按账号统计广告曝光量，长期没有曝光会 403 暂停免费额度。Worker 每次 chat 前自动模拟 CLI 的 banner 曝光上报；如仍触发，跑一次官方 CLI 即可。
-- **并发 = 1**：上游按账号强制单并发，第二条并发请求返回 429 `{code: concurrent}`。账号最多 4 个 CLI 会话坑，占满返回 `concurrent_session`（Worker 自动 reset 重试一次）。
+- **并发 = 1**：上游按账号强制单并发，第二条并发请求返回 429 `{code: concurrent}`。账号最多 4 个 CLI 会话坑，占满返回 `concurrent_session`（HTTP 409 或 429，Worker 自动 reset 重试一次）。
 - **日额度**：15000 credits ≈ $1.125/天（按 token 折算扣），UTC 零点重置；`/v1/usage` 可查。
 - **JWT 90 天有效**：过期后重新走「获取 token」流程；token 是一次性发放，丢失只能重新授权。
 - **不要把 FREEPI_TOKEN 提交到任何仓库**——它绑定你的 GitHub 账号，泄露等于把账号额度送人。

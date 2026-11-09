@@ -96,8 +96,8 @@ export default {
           headers: { ...freepiHeaders(env.FREEPI_TOKEN), 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
-        // session gate: release stuck slot and retry once
-        if (upstream.status === 429) {
+        // session gate: release stuck slot and retry once (upstream returns 409 or 429)
+        if (upstream.status === 409 || upstream.status === 429) {
           const probe = await upstream.text();
           if (probe.includes('concurrent_session')) {
             await fetch('https://api.freepi.ai/session/reset', {
