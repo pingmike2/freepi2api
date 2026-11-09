@@ -24,8 +24,8 @@ magpie plugin add github:pingmike2/freepi-magpie-plugin
 
 | 方式 | 适合 | 特点 |
 |------|------|------|
-| magpie 插件 | 只想在 magpie 里用 | 零部署，登录即用，单账号 |
-| 本仓库 Worker | 要给别的客户端/程序用（OpenAI SDK、Hermes、自建服务） | 需要 Cloudflare 账号，支持**多账号号池**自动切号、统一 API Key |
+| magpie 插件 | 只想在 magpie 里用 | 零部署，登录即用；**支持多账号**（每个号单独登录一次，按 GitHub handle 区分，各自独立 token / 额度卡片 / 并发），撞限流时由 magpie failover 换号 |
+| 本仓库 Worker | 要给别的客户端/程序用（OpenAI SDK、Hermes、自建服务） | 需要 Cloudflare 账号；把多账号塞进**一个 API Key + 一个 base_url**，Worker 内部按号池顺序自动切号，不用改客户端配置 |
 
 ## 一键安装
 
