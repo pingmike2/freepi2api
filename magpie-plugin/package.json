@@ -1,7 +1,7 @@
 {
-  "name": "@pingmike2/opencode-freepi-auth",
-  "version": "0.1.0",
-  "description": "OpenCode provider plugin: FreePI (freepi.ai) free daily credits via your own free-pi token, with ads warm-up, session-gate auto-reset and token-pool failover",
+  "name": "opencode-freepi-auth",
+  "version": "0.2.0",
+  "description": "OpenCode provider plugin: FreePI (freepi.ai) — GitHub device sign-in or pasted token, free daily credits with ads warm-up and session-gate retry",
   "type": "module",
   "main": "./index.mjs",
   "files": ["index.mjs", "README.md", "LICENSE"],
@@ -9,6 +9,7 @@
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/pingmike2/freepi2api", "directory": "magpie-plugin" },
   "magpie": {
+    "name": "freepi",
     "icon": "https://freepi.ai/favicon.ico",
     "maxConcurrency": 4
   }

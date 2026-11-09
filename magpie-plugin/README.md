@@ -25,14 +25,12 @@ magpie provider test freepi  # ✓ chat · glm-5.3-flash
 
 ## Get a token
 
-The token is the free-pi CLI's own sign-in (a JWT, valid 90 days):
+**magpie / the app**: pick **Sign in with GitHub (device code)** — the
+plugin mints a device session, opens GitHub's own device page, shows the
+code, and finishes on its own. Nothing to paste.
 
-```sh
-npx free-pi-cli@latest auth login
-# GitHub device sign-in; the token lands in the CLI's config
-```
-
-or mint one by hand:
+**A terminal (OpenCode)**: `magpie plugin login freepi` and choose the
+same method; or paste a token you minted by hand:
 
 ```sh
 curl -s -X POST https://api.freepi.ai/auth/github/device -d '{}' -H 'content-type: application/json'
@@ -43,9 +41,8 @@ curl -s -X POST https://api.freepi.ai/auth/token \
 # → {"token":"eyJ…"}  — shown once, copy it now
 ```
 
-Paste it at `magpie plugin login freepi`. Daily credits: 15,000
-(established accounts), +5,000 per qualified invite, refilled at UTC
-midnight.
+The token is a JWT valid 90 days. Daily credits: 15,000 (established
+accounts), +5,000 per qualified invite, refilled at UTC midnight.
 
 ## What the plugin handles
 

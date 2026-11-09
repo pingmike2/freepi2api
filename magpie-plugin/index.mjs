@@ -127,8 +127,106 @@ export const FreePIAuthPlugin = async () => {
       maxConcurrency: 4,
       methods: [
         {
+          type: "oauth",
+          label: "Sign in with GitHub (device code)",
+          async authorize(_inputs, { signal } = {}) {
+            // the free-pi device flow: mint a session, show GitHub's own
+            // device page (magpie opens the url and shows the code), poll
+            // until the account answers, then read the handle so the
+            // account's row names itself
+            let device
+            try {
+              const res = await fetch(`${ORIGIN}/auth/github/device`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: "{}",
+                signal,
+              })
+              if (!res.ok) throw new Error(`FreePI answered ${res.status}`)
+              device = await res.json()
+            } catch (e) {
+              return { type: "failed", error: `FreePI device sign-in: ${e?.message ?? e}` }
+            }
+            const sid = device?.session_id
+            const code = device?.user_code
+            const url = device?.verification_uri_complete ?? device?.verification_uri
+            if (!sid || !code || !url) {
+              return { type: "failed", error: "FreePI device sign-in: no session came back" }
+            }
+            // consent first, so the poll below is answered on its merits
+            try {
+              await fetch(`${ORIGIN}/auth/consent`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  session_id: sid,
+                  consent_version: "4",
+                  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+                  locale: "en",
+                }),
+                signal,
+              })
+            } catch {}
+            const interval = Math.max(Number(device.interval) || 5, 3) * 1000
+            const deadline = Date.now() + (Number(device.expires_in) || 900) * 1000
+            return {
+              url,
+              instructions: `Enter the code ${code} on GitHub, then Authorize.`,
+              method: "auto",
+              async callback(_code, { signal } = {}) {
+                for (;;) {
+                  if (Date.now() > deadline) {
+                    return { type: "failed", error: "the sign-in expired; start again" }
+                  }
+                  await sleep(interval)
+                  if (signal?.aborted) return { type: "failed", error: "cancelled" }
+                  let res
+                  try {
+                    res = await fetch(`${ORIGIN}/auth/token`, {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({
+                        session_id: sid,
+                        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+                        locale: "en",
+                      }),
+                      signal,
+                    })
+                  } catch {
+                    continue // a hiccup: ask again
+                  }
+                  if (!res.ok) {
+                    const text = await res.text().catch(() => "")
+                    if (res.status >= 400 && res.status < 500 && res.status !== 403 && res.status !== 429) {
+                      return { type: "failed", error: `FreePI sign-in: ${text || res.status}` }
+                    }
+                    continue
+                  }
+                  const body = await res.json().catch(() => null)
+                  if (body?.status === "pending") continue
+                  if (!body?.token) {
+                    return { type: "failed", error: "FreePI sign-in: unexpected answer" }
+                  }
+                  const token = body.token
+                  let accountId
+                  try {
+                    const me = await fetch(`${ORIGIN}/me`, {
+                      headers: { authorization: `Bearer ${token}` },
+                      signal,
+                    })
+                    if (me.ok) accountId = (await me.json())?.handle
+                  } catch {}
+                  // a success with key is kept as an API key, so both
+                  // sign-in methods land in the same loader
+                  return { type: "success", key: token, accountId: accountId ?? "freepi account" }
+                }
+              },
+            }
+          },
+        },
+        {
           type: "api",
-          label: "FreePI token (free-pi CLI: GitHub device sign-in, JWT valid 90 days)",
+          label: "FreePI token (paste the free-pi CLI's JWT)",
           placeholder: "eyJhbG…",
         },
       ],
