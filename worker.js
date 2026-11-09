@@ -101,26 +101,38 @@ export default {
       // Unknown ids land on deepseek-v4-flash server-side. Keep requested id for response display.
       const requestedModel = body.model || 'deepseek-v4-flash';
 
+      // token pool: primary + optional alt; 409/429 on primary → try alt once
       let upstream;
+      const tokens = [env.FREEPI_TOKEN, env.FREEPI_TOKEN_ALT].filter(Boolean);
       try {
         await warmAds(env.FREEPI_TOKEN);
-        upstream = await fetch('https://api.freepi.ai/v1/chat/completions', {
-          method: 'POST',
-          headers: { ...freepiHeaders(env.FREEPI_TOKEN), 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        // session gate: release stuck slot and retry once (upstream returns 409 or 429)
-        if (upstream.status === 409 || upstream.status === 429) {
+        upstream = await chatFetch(tokens[0], body);
+        // session gate: release stuck slot and retry / switch token (upstream returns 409 or 429)
+        if ((upstream.status === 409 || upstream.status === 429) && tokens.length > 1) {
+          const probe = await upstream.text();
+          if (probe.includes('concurrent_session')) {
+            // reset primary in background, serve via alt
+            fetch('https://api.freepi.ai/session/reset', {
+              method: 'POST', headers: { 'Authorization': 'Bearer ' + tokens[0] },
+            }).catch(() => {});
+            upstream = await chatFetch(tokens[1], body);
+            if (upstream.status === 409 || upstream.status === 429) {
+              await upstream.text().catch(() => '');
+              await fetch('https://api.freepi.ai/session/reset', {
+                method: 'POST', headers: { 'Authorization': 'Bearer ' + tokens[1] },
+              }).catch(() => {});
+              upstream = await chatFetch(tokens[1], body);
+            }
+          } else {
+            upstream = new Response(probe, { status: upstream.status, headers: upstream.headers });
+          }
+        } else if (upstream.status === 409 || upstream.status === 429) {
           const probe = await upstream.text();
           if (probe.includes('concurrent_session')) {
             await fetch('https://api.freepi.ai/session/reset', {
-              method: 'POST', headers: { 'Authorization': 'Bearer ' + env.FREEPI_TOKEN },
+              method: 'POST', headers: { 'Authorization': 'Bearer ' + tokens[0] },
             }).catch(() => {});
-            upstream = await fetch('https://api.freepi.ai/v1/chat/completions', {
-              method: 'POST',
-              headers: { ...freepiHeaders(env.FREEPI_TOKEN), 'Content-Type': 'application/json' },
-              body: JSON.stringify(body),
-            });
+            upstream = await chatFetch(tokens[0], body);
           } else {
             upstream = new Response(probe, { status: upstream.status, headers: upstream.headers });
           }
@@ -163,6 +175,14 @@ function freepiHeaders(token) {
     'x-session-id': sessionId(),
     'x-client-version': '0.6.15',
   };
+}
+
+function chatFetch(token, body) {
+  return fetch('https://api.freepi.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: { ...freepiHeaders(token), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 }
 
 // per-isolate session id, generated lazily inside handler scope (global-scope crypto.randomUUID is disallowed)
