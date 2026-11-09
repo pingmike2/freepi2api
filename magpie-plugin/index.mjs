@@ -50,6 +50,13 @@ const MODELS = [
   ["kimi-k3.1-pro", "Kimi K3.1 Pro · daily limit · ~41x", 128000, 16384],
 ]
 
+// auth can arrive in either shape: an api {key} from older installs or a
+// manual paste, or the oauth shape this plugin now stores ({access,
+// refresh, accountId}). Read the token out of whichever field carries it.
+function tokenOf(auth) {
+  return auth?.key ?? auth?.access ?? auth?.refresh ?? null
+}
+
 const modelOf = ([id, name, context, output]) => ({
   id,
   name,
@@ -171,7 +178,11 @@ export const FreePIAuthPlugin = async () => {
             const deadline = Date.now() + (Number(device.expires_in) || 900) * 1000
             return {
               url,
-              instructions: `Enter the code ${code} on GitHub, then Authorize.`,
+              instructions: [
+                `Your code: ${code}`,
+                "GitHub should pre-fill it — if the box is empty, type the code above.",
+                "Then press Continue and Authorize.",
+              ].join("\n"),
               method: "auto",
               async callback(_code, { signal } = {}) {
                 for (;;) {
@@ -216,9 +227,17 @@ export const FreePIAuthPlugin = async () => {
                     })
                     if (me.ok) accountId = (await me.json())?.handle
                   } catch {}
-                  // a success with key is kept as an API key, so both
-                  // sign-in methods land in the same loader
-                  return { type: "success", key: token, accountId: accountId ?? "freepi account" }
+                  // kept in the oauth shape, whose extra fields survive:
+                  // accountId names the account's row after the GitHub
+                  // handle, and the token rides as access/refresh (the
+                  // JWT has no separate refresh, and auth.refresh is not
+                  // given, so magpie never tries to renew it)
+                  return {
+                    type: "success",
+                    refresh: token,
+                    access: token,
+                    accountId: accountId || "freepi account",
+                  }
                 }
               },
             }
@@ -228,6 +247,29 @@ export const FreePIAuthPlugin = async () => {
           type: "api",
           label: "FreePI token (paste the free-pi CLI's JWT)",
           placeholder: "eyJhbG…",
+          // validate on save and name the account after the GitHub handle
+          async authorize(inputs, { signal } = {}) {
+            const key = typeof inputs === "string" ? inputs : inputs?.key ?? inputs?.value
+            if (!key) return { type: "failed", error: "Paste the free-pi CLI's JWT (starts with eyJ)." }
+            try {
+              const me = await fetch(`${ORIGIN}/me`, {
+                headers: { authorization: `Bearer ${key}` },
+                signal,
+              })
+              if (!me.ok) return { type: "failed", error: `Token rejected by api.freepi.ai (HTTP ${me.status}).` }
+              const handle = (await me.json())?.handle
+              // same oauth-shaped storage as the device-flow method, so
+              // the account row shows the handle either way
+              return {
+                type: "success",
+                refresh: key,
+                access: key,
+                accountId: handle || "freepi account",
+              }
+            } catch (e) {
+              return { type: "failed", error: `Cannot reach api.freepi.ai: ${e?.message ?? e}` }
+            }
+          },
         },
       ],
 
@@ -236,8 +278,8 @@ export const FreePIAuthPlugin = async () => {
       // the session-gate reset-and-retry
       async loader(getAuth) {
         const auth = await getAuth()
-        if (auth?.type !== "api" || !auth.key) return {}
-        const token = auth.key
+        const token = tokenOf(auth)
+        if (!token) return {}
         return {
           baseURL: BASE,
           apiKey: token,
@@ -297,9 +339,10 @@ export const FreePIAuthPlugin = async () => {
       // ignores it; magpie draws the quota card from it.
       async usage(getAuth) {
         const auth = await getAuth()
-        if (auth?.type !== "api" || !auth.key) return { error: "not signed in", windows: [] }
+        const token = tokenOf(auth)
+        if (!token) return { error: "not signed in", windows: [] }
         try {
-          const res = await fetch(`${ORIGIN}/me`, { headers: { authorization: `Bearer ${auth.key}` } })
+          const res = await fetch(`${ORIGIN}/me`, { headers: { authorization: `Bearer ${token}` } })
           if (!res.ok) return { error: `FreePI answered ${res.status}`, windows: [] }
           const me = await res.json()
           const allowance = me.allowance_credits ?? 0
@@ -329,10 +372,11 @@ export const FreePIAuthPlugin = async () => {
       // serves, with its usage multiplier in the name; a read that fails
       // keeps the static list above
       async models(provider, { auth } = {}) {
-        if (auth?.type !== "api" || !auth.key) return provider.models
+        const token = tokenOf(auth)
+        if (!token) return provider.models
         try {
           const res = await fetch(`${ORIGIN}/client-version`, {
-            headers: { authorization: `Bearer ${auth.key}` },
+            headers: { authorization: `Bearer ${token}` },
           })
           if (!res.ok) return provider.models
           const cv = await res.json()

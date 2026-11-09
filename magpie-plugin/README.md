@@ -1,37 +1,58 @@
-# freepi2api magpie plugin — FreePI (freepi.ai) provider
-
-> **插件已迁到独立仓库：[pingmike2/freepi-magpie-plugin](https://github.com/pingmike2/freepi-magpie-plugin)** —
-> 用 `magpie plugin add github:pingmike2/freepi-magpie-plugin` 安装可收一键更新
-> （本目录是源码镜像，不再随 release 发版）。
+# freepi — FreePI (freepi.ai) provider plugin for magpie / OpenCode
 
 [magpie](https://usemagpie.ai) / OpenCode provider plugin that turns your
 own FreePI account's free daily credits into a provider every agent can
-use — the same upstream this repo's Cloudflare Worker proxies, but running
-as a plugin: no Worker, no deployment, your token straight to
-api.freepi.ai.
+use: no Worker, no deployment, your token straight to api.freepi.ai.
+
+The companion project — a Cloudflare Worker that proxies the same API as
+a plain OpenAI-compatible endpoint — lives at
+[pingmike2/freepi2api](https://github.com/pingmike2/freepi2api).
 
 ## Install
 
-**magpie (app)**: Plugins → Add a plugin → give it this folder
-(`magpie-plugin/`), or from a terminal:
+**magpie (app)**: Plugins → Add a plugin → paste:
 
 ```sh
-magpie plugin add ./magpie-plugin
-magpie plugin login freepi   # paste your token
+github:pingmike2/freepi-magpie-plugin
+```
+
+or from a terminal:
+
+```sh
+magpie plugin add github:pingmike2/freepi-magpie-plugin
+magpie plugin login freepi   # choose the GitHub device sign-in
 magpie provider test freepi  # ✓ chat · glm-5.3-flash
 ```
 
-**OpenCode**: add the folder to `plugin` in `opencode.json`:
+Installed this way, updates are one click: a push to `main` shows the
+update dot on Plugins → Update all.
+
+**OpenCode**: add the repository to `plugin` in `opencode.json`:
 
 ```json
-{ "plugin": { "freepi": "/absolute/path/to/magpie-plugin" } }
+{ "plugin": { "freepi": "github:pingmike2/freepi-magpie-plugin" } }
 ```
 
-## Get a token
+or a cloned folder: `{ "plugin": { "freepi": "/absolute/path/to/freepi-magpie-plugin" } }`
+
+## Sign in
 
 **magpie / the app**: pick **Sign in with GitHub (device code)** — the
 plugin mints a device session, opens GitHub's own device page, shows the
 code, and finishes on its own. Nothing to paste.
+
+GitHub pre-fills the code on its device page. If the box comes up empty
+(e.g. you had to sign in to GitHub first and landed back on the page),
+just type the code shown in magpie, then press Continue and Authorize.
+
+Accounts are named after the GitHub handle in both sign-in methods — the
+device flow reads it from the API, and pasted tokens are validated
+against `/me` on save, so a bad token is rejected right away.
+
+**Multiple accounts, each with its own proxy**: that is a magpie app
+feature, not plugin code — set a per-account SOCKS5/HTTP proxy in the
+account's settings, and every request this plugin makes for that account
+inherits it automatically (same design as the zcode plugin).
 
 **A terminal (OpenCode)**: `magpie plugin login freepi` and choose the
 same method; or paste a token you minted by hand:
@@ -70,4 +91,4 @@ remaining / allowance and the UTC refill time.
 
 ## License
 
-MIT — same as the rest of this repo.
+MIT
