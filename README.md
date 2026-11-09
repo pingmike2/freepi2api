@@ -2,6 +2,31 @@
 
 把 freepi.ai 的免费 coding 模型额度包成标准 OpenAI API。部署在你自己的 Cloudflare Worker 上，上游协议已逆向验证（free-pi-cli 0.6.15）。
 
+## 不想部署 Worker？直接用 magpie 插件
+
+不用管这个仓库的 Worker，也不用自己搭反代——装 magpie 插件即可，额度直接走你的 freepi 账号：
+
+打开 magpie → **发现 / Discover** → 输入仓库地址：
+
+```
+https://github.com/pingmike2/freepi-magpie-plugin
+```
+
+或命令行：
+
+```bash
+magpie plugin add github:pingmike2/freepi-magpie-plugin
+```
+
+装好后在 magpie 里选 **Sign in with GitHub (device code)** 登录，模型列表自动拉取，额度卡片实时显示。插件仓库：<https://github.com/pingmike2/freepi-magpie-plugin>（从仓库直接装，`git push` 即可收到一键更新）。
+
+**两种方式怎么选：**
+
+| 方式 | 适合 | 特点 |
+|------|------|------|
+| magpie 插件 | 只想在 magpie 里用 | 零部署，登录即用，单账号 |
+| 本仓库 Worker | 要给别的客户端/程序用（OpenAI SDK、Hermes、自建服务） | 需要 Cloudflare 账号，支持**多账号号池**自动切号、统一 API Key |
+
 ## 一键安装
 
 ```bash
