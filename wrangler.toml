@@ -1,0 +1,10 @@
+name = "freepi2api"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+
+# Secrets (set via `npx wrangler secret put`):
+#   FREEPI_TOKEN    — freepi.ai JWT (90-day validity, from GitHub device flow)
+#   WORKER_API_KEY  — local key for clients hitting this worker
+
+# wrangler.toml intentionally holds NO secrets; keep it pushable to GitHub.

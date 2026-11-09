@@ -1,0 +1,134 @@
+/**
+ * freepi2api — freepi.ai → OpenAI-compatible API proxy (Cloudflare Worker)
+ *
+ * Upstream contract (reverse-engineered from free-pi-cli 0.6.15, verified 2026-11-09):
+ * - POST https://api.freepi.ai/v1/chat/completions  (OpenAI chat format, SSE supported)
+ * - Headers: Authorization: Bearer <JWT>, x-session-id: <uuid>, x-client-version: <ver>
+ * - Only model: deepseek/deepseek-v4-flash (any model param lands here server-side)
+ * - Concurrency 1 per account; daily 15000 credits (~$1.125), resets 00:00 UTC
+ * - GET /me → remaining_credits_today / refill_at
+ * - JWT valid 90 days
+ */
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const cors = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    };
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+
+    const VERSION = '1.0.0';
+
+    // healthz: public, before auth; no token/key info leaked
+    if (url.pathname === '/healthz') {
+      return Response.json({ status: 'ok', version: VERSION }, { headers: cors });
+    }
+
+    // local API key check (WORKER_API_KEY optional; if unset, reject protected routes)
+    const protectedPaths = ['/v1/chat/completions', '/v1/models', '/v1/usage'];
+    if (protectedPaths.includes(url.pathname)) {
+      const key = (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
+      if (!env.WORKER_API_KEY || !env.FREEPI_TOKEN) {
+        return Response.json({ error: { message: 'service misconfigured', code: 'config_error' } }, { status: 500, headers: cors });
+      }
+      // constant-time compare
+      const a = new TextEncoder().encode(key), b = new TextEncoder().encode(env.WORKER_API_KEY);
+      let diff = a.length ^ b.length;
+      for (let i = 0; i < Math.min(a.length, b.length); i++) diff |= a[i] ^ b[i];
+      if (diff !== 0) {
+        return Response.json({ error: { message: 'Invalid API key', code: 'invalid_api_key' } }, { status: 401, headers: cors });
+      }
+    }
+
+    // models: static catalog (upstream has no /v1/models)
+    if (url.pathname === '/v1/models') {
+      return Response.json({
+        object: 'list',
+        data: [{ id: 'deepseek/deepseek-v4-flash', object: 'model', owned_by: 'freepi' }],
+      }, { headers: cors });
+    }
+
+    // usage passthrough from /me
+    if (url.pathname === '/v1/usage') {
+      let me;
+      try {
+        me = await fetch('https://api.freepi.ai/me', { headers: freepiHeaders(env.FREEPI_TOKEN) });
+      } catch (err) {
+        return Response.json({ error: { message: 'upstream unreachable', code: 'upstream_error' } }, { status: 502, headers: cors });
+      }
+      const data = await me.json().catch(() => ({}));
+      return Response.json({
+        remaining_credits_today: data.remaining_credits_today,
+        remaining_usd_today: data.remaining_usd_today,
+        cap_usd_today: data.cap_usd_today,
+        refill_at: data.refill_at,
+        tier: data.tier,
+        handle: data.handle,
+        raw_status: me.status,
+      }, { headers: cors });
+    }
+
+    // chat completions → upstream
+    if (url.pathname === '/v1/chat/completions' && request.method === 'POST') {
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return Response.json({ error: { message: 'invalid JSON body', code: 'bad_request' } }, { status: 400, headers: cors });
+      }
+      // model param lands on deepseek server-side anyway; keep requested id in response
+      const requestedModel = body.model || 'deepseek/deepseek-v4-flash';
+      body.model = 'deepseek/deepseek-v4-flash';
+
+      let upstream;
+      try {
+        upstream = await fetch('https://api.freepi.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: { ...freepiHeaders(env.FREEPI_TOKEN), 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        return Response.json({ error: { message: 'upstream unreachable', code: 'upstream_error' } }, { status: 502, headers: cors });
+      }
+
+      // stream: pipe SSE through verbatim
+      if (body.stream) {
+        return new Response(upstream.body, {
+          status: upstream.status,
+          headers: { ...cors, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+        });
+      }
+
+      const text = await upstream.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw: text.slice(0, 2000) }; }
+      // keep caller's requested model name in the response for client display
+      if (data && data.model) data.model = requestedModel;
+      return new Response(JSON.stringify(data), {
+        status: upstream.status,
+        headers: { ...cors, 'Content-Type': 'application/json' },
+      });
+    }
+
+    return Response.json({ error: { message: 'not found', code: 'not_found' } }, { status: 404, headers: cors });
+  },
+};
+
+function freepiHeaders(token) {
+  if (!token) throw new Error('FREEPI_TOKEN not set');
+  return {
+    'Authorization': 'Bearer ' + token,
+    'x-session-id': sessionId(),
+    'x-client-version': '0.6.15',
+  };
+}
+
+// per-isolate session id, generated lazily inside handler scope (global-scope crypto.randomUUID is disallowed)
+let SESSION_ID = null;
+function sessionId() {
+  if (!SESSION_ID) SESSION_ID = crypto.randomUUID();
+  return SESSION_ID;
+}
