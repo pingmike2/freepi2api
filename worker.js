@@ -101,38 +101,18 @@ export default {
       // Unknown ids land on deepseek-v4-flash server-side. Keep requested id for response display.
       const requestedModel = body.model || 'deepseek-v4-flash';
 
-      // token pool: primary + optional alt; 409/429 on primary → try alt once
+      // token pool: primary + optional alt; per-account ads re-warm; the
+      // ads gate (403 ads_required) re-warms and asks again, then tries
+      // the next account; the session gate (409/429 concurrent_session)
+      // resets the stuck slots and asks again
       let upstream;
       const tokens = [env.FREEPI_TOKEN, env.FREEPI_TOKEN_ALT].filter(Boolean);
       try {
-        await warmAds(env.FREEPI_TOKEN);
-        upstream = await chatFetch(tokens[0], body);
-        // session gate: release stuck slot and retry / switch token (upstream returns 409 or 429)
-        if ((upstream.status === 409 || upstream.status === 429) && tokens.length > 1) {
-          const probe = await upstream.text();
-          if (probe.includes('concurrent_session')) {
-            // reset primary in background, serve via alt
-            fetch('https://api.freepi.ai/session/reset', {
-              method: 'POST', headers: { 'Authorization': 'Bearer ' + tokens[0] },
-            }).catch(() => {});
-            upstream = await chatFetch(tokens[1], body);
-            if (upstream.status === 409 || upstream.status === 429) {
-              await upstream.text().catch(() => '');
-              await fetch('https://api.freepi.ai/session/reset', {
-                method: 'POST', headers: { 'Authorization': 'Bearer ' + tokens[1] },
-              }).catch(() => {});
-              upstream = await chatFetch(tokens[1], body);
-            }
-          } else {
-            upstream = new Response(probe, { status: upstream.status, headers: upstream.headers });
-          }
-        } else if (upstream.status === 409 || upstream.status === 429) {
-          const probe = await upstream.text();
-          if (probe.includes('concurrent_session')) {
-            await fetch('https://api.freepi.ai/session/reset', {
-              method: 'POST', headers: { 'Authorization': 'Bearer ' + tokens[0] },
-            }).catch(() => {});
-            upstream = await chatFetch(tokens[0], body);
+        upstream = await sendWithGates(tokens[0], body);
+        if (upstream.status === 403 && tokens.length > 1) {
+          const probe = await upstream.text().catch(() => '');
+          if (probe.includes('ads_required')) {
+            upstream = await sendWithGates(tokens[1], body);
           } else {
             upstream = new Response(probe, { status: upstream.status, headers: upstream.headers });
           }
@@ -192,24 +172,58 @@ function sessionId() {
   return SESSION_ID;
 }
 
-// ads gate: upstream pauses free completions when it thinks ads aren't showing.
-// Simulate the CLI's banner flow: fetch an ad, report the impression. Failures ignored —
-// upstream only needs a steady trickle of impressions, not a valid one per request.
-let adsWarmed = false;
-async function warmAds(token) {
-  if (adsWarmed) return;
-  adsWarmed = true;
+// ads gate: upstream pauses an account whose ad impressions went stale
+// ("ads aren't showing for this account"), and one fresh impression pair
+// unpauses it at once (verified 2026-11-10: a paused account answered
+// 403 ads_required, then 200 right after one warm). Warm each account on
+// a short interval, and again on the gate itself.
+const ADS_TTL_MS = 4 * 60 * 1000;
+const adsWarmedAt = new Map(); // token -> last warmed at
+async function warmAds(token, force = false) {
+  const at = adsWarmedAt.get(token) ?? 0;
+  if (!force && Date.now() - at < ADS_TTL_MS) return;
   try {
-    const sid = sessionId();
     const next = await fetch('https://api.freepi.ai/ads/next?slot=banner', {
-      headers: { 'Authorization': 'Bearer ' + token, 'x-session-id': sid },
+      headers: { 'Authorization': 'Bearer ' + token },
     });
-    if (!next.ok) return;
-    const ad = await next.json();
-    await fetch('https://api.freepi.ai/ads/impression', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + token, 'x-session-id': sid, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ad_id: ad.ad_id, click_token: ad.click_token, imp_fired: true }),
-    });
+    if (next.ok) {
+      const ad = await next.json();
+      if (ad && ad.ad_id) {
+        await fetch('https://api.freepi.ai/ads/impression', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ad_id: ad.ad_id, click_token: ad.click_token, imp_fired: true }),
+        });
+      }
+    }
   } catch {}
+  adsWarmedAt.set(token, Date.now());
+}
+
+// one account's chat with the two gates answered in place: the ads gate
+// re-warms and asks once more; the session gate resets and asks once more
+async function sendWithGates(token, body) {
+  await warmAds(token);
+  let res = await chatFetch(token, body);
+  if (res.status === 403) {
+    const probe = await res.text();
+    if (probe.includes('ads_required')) {
+      await warmAds(token, true);
+      res = await chatFetch(token, body);
+    } else {
+      res = new Response(probe, { status: res.status, headers: res.headers });
+    }
+  }
+  if (res.status === 409 || res.status === 429) {
+    const probe = await res.text();
+    if (probe.includes('concurrent_session')) {
+      await fetch('https://api.freepi.ai/session/reset', {
+        method: 'POST', headers: { 'Authorization': 'Bearer ' + token },
+      }).catch(() => {});
+      res = await chatFetch(token, body);
+    } else {
+      res = new Response(probe, { status: res.status, headers: res.headers });
+    }
+  }
+  return res;
 }
