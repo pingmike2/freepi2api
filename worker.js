@@ -160,7 +160,7 @@ function freepiHeaders(token) {
   return {
     'Authorization': 'Bearer ' + token,
     'x-session-id': sessionId(),
-    'x-client-version': '0.6.15',
+    'x-client-version': '0.6.16',
   };
 }
 
