@@ -32,6 +32,32 @@ export default {
       return Response.json({ status: 'ok', version: VERSION }, { headers: cors });
     }
 
+    // freepi passthrough: any /freepi/<path> goes to api.freepi.ai/<path>
+    // verbatim from the worker's own egress — clients behind ad-gate-blocked
+    // IPs (e.g. WARP) route their whole client through here. Authenticated
+    // with the same WORKER_API_KEY; the caller's own FreePI Bearer rides along.
+    if (url.pathname.startsWith('/freepi/')) {
+      const key = (request.headers.get('x-worker-key') || (request.headers.get('authorization') || '').replace(/^Bearer\s+/i, '').trim());
+      const a = new TextEncoder().encode(key), b = new TextEncoder().encode(env.WORKER_API_KEY);
+      let diff = a.length ^ b.length;
+      for (let i = 0; i < Math.min(a.length, b.length); i++) diff |= a[i] ^ b[i];
+      if (diff !== 0 || !env.WORKER_API_KEY) {
+        return Response.json({ error: { message: 'Invalid API key', code: 'invalid_api_key' } }, { status: 401, headers: cors });
+      }
+      const upstream = new URL('https://api.freepi.ai' + url.pathname.replace(/^\/freepi/, '') + url.search);
+      const fwd = new Request(upstream, request);
+      fwd.headers.delete('x-worker-key');
+      fwd.headers.delete('host');
+      fwd.headers.delete('cf-connecting-ip');
+      fwd.headers.delete('cf-ipcountry');
+      fwd.headers.delete('cf-ray');
+      fwd.headers.delete('cf-visitor');
+      fwd.headers.delete('x-forwarded-for');
+      fwd.headers.delete('x-forwarded-proto');
+      fwd.headers.delete('x-real-ip');
+      return fetch(fwd);
+    }
+
     // local API key check (WORKER_API_KEY optional; if unset, reject protected routes)
     const protectedPaths = ['/v1/chat/completions', '/v1/models', '/v1/usage'];
     if (protectedPaths.includes(url.pathname)) {
