@@ -161,11 +161,11 @@ function freepiHeaders(token) {
     'Authorization': 'Bearer ' + token,
     // one session per worker lifetime, like one CLI session; the ads gate
     // tracks impressions per session, so ads and chat must share this id
-    'x-session-id': SESSION_ID,
+    'x-session-id': sessionId(),
     'x-client-version': '0.6.19',
     // 0.6.19: one uuid per turn on the provider request; without it the
     // upstream answers with a fake "out of date" completion instead of 426
-    'x-turn-id': TURN_ID,
+    'x-turn-id': turnId(),
   };
 }
 
@@ -178,7 +178,7 @@ function fingerprintHeaders(extra) {
     if (o.timeZone) tz = o.timeZone;
     if (o.locale) locale = o.locale;
   } catch {}
-  return { ...extra, 'x-client-os': 'linux', 'x-client-arch': 'x64', 'x-client-locale': locale, 'x-client-timezone': tz, 'x-session-id': SESSION_ID, 'x-turn-id': TURN_ID };
+  return { ...extra, 'x-client-os': 'linux', 'x-client-arch': 'x64', 'x-client-locale': locale, 'x-client-timezone': tz, 'x-session-id': sessionId(), 'x-turn-id': turnId() };
 }
 
 // The account pool. FREEPI_TOKENS is the list form — one secret holding
@@ -221,14 +221,20 @@ function chatFetch(token, body) {
   });
 }
 
-// per-isolate session id, generated lazily inside handler scope (global-scope crypto.randomUUID is disallowed)
+// per-isolate session id, generated lazily inside handler scope (global-scope crypto.randomUUID is disallowed).
+// Workers are single-threaded per isolate, so the lazily-minted id is safe
+// to share across concurrent callers; the ads gate keys on it.
 let SESSION_ID = null;
 function sessionId() {
   if (!SESSION_ID) SESSION_ID = crypto.randomUUID();
   return SESSION_ID;
 }
-// one uuid per turn, refreshed at the start of each sendWithGates call so
-// the ads requests and the chat request share the same turn id
+// one uuid per turn. sendWithGates mints a fresh one at the start of every
+// attempt so the ads requests and that attempt's chat request share it;
+// other callers (e.g. /v1/usage) just get a per-call uuid.
+function turnId() {
+  return TURN_ID || crypto.randomUUID();
+}
 let TURN_ID = null;
 
 // ads gate: upstream pauses an account whose ad impressions went stale
@@ -274,7 +280,9 @@ async function sendWithGates(token, body) {
   if (res.status === 403) {
     const probe = await res.text();
     if (probe.includes('ads_required')) {
+      TURN_ID = crypto.randomUUID();
       await warmAds(token);
+      await sleep(400);
       res = await chatFetch(token, body);
     } else {
       res = new Response(probe, { status: res.status, headers: res.headers });
@@ -286,6 +294,7 @@ async function sendWithGates(token, body) {
   if (res.status === 200 && !(res.headers.get('content-type') || '').includes('text/event-stream')) {
     const probe = await res.clone().text();
     if (probe.includes('"prompt_tokens":0') && probe.includes('shows ads')) {
+      TURN_ID = crypto.randomUUID();
       await warmAds(token);
       await sleep(800);
       res = await chatFetch(token, body);
@@ -297,6 +306,9 @@ async function sendWithGates(token, body) {
       await fetch('https://api.freepi.ai/session/reset', {
         method: 'POST', headers: { 'Authorization': 'Bearer ' + token },
       }).catch(() => {});
+      TURN_ID = crypto.randomUUID();
+      await warmAds(token);
+      await sleep(400);
       res = await chatFetch(token, body);
     } else {
       res = new Response(probe, { status: res.status, headers: res.headers });
