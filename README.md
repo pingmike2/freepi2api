@@ -125,7 +125,13 @@ npx wrangler tail
 
 ### 「ads_required」403 怎么办
 
-上游按账号统计广告曝光，没曝光就暂停免费额度。Worker 已内置：每次 chat 前自动拉一条 banner 广告并上报曝光（每个 isolate 一次）。若仍触发，用官方 CLI 跑一次让真实广告曝光即可恢复。
+上游按 **session** 统计广告曝光（0.6.19 起），没曝光就暂停免费额度。完整广告流程三步，全部带自己的 token：
+
+1. `GET /ads/next?slot=banner` → 返回 `ad_id` + `click_token` + `imp_url`
+2. `POST /ads/impression` → `{ad_id, click_token, imp_fired: true}`
+3. `GET imp_url`（`api.trygravity.ai`）→ 打广告平台的曝光回执
+
+Worker 已内置这三步：每次 chat 前自动走完（广告与 chat 绑同一 session-id，impression 异步入库有延迟，warm 后等 400ms 再发请求；被拦的假 200 响应会自动 rewarm 重试一次）。若仍触发，用官方 CLI 跑一次让真实广告曝光即可恢复。
 
 ## 注意事项
 
@@ -133,7 +139,7 @@ npx wrangler tail
 - **usage 倍率**：模型名后的 ~Nx 是额度消耗倍率——deepseek-v4-flash 1x 最省，ultrafast 295x 一下就烧光日额度，选模型注意。
 - **未知 model 名**会落回 deepseek-v4-flash 服务端；响应里的 `model` 字段是上游实际服务 model 的真实回显（不再伪装成请求名）。
 - **实测可用**（生产过 worker）：glm-5.3-flash / deepseek-v4-pro / gpt-6-luna / solar-pro-4 / deepseek-v4.1-flash / gpt-oss-120b-speed / particle 均正常返回。
-- **ads_required 门**：上游按账号统计广告曝光量，长期没有曝光会 403 暂停免费额度。Worker 每次 chat 前自动模拟 CLI 的 banner 曝光上报；如仍触发，跑一次官方 CLI 即可。
+- **ads_required 门**：上游按 session 统计广告曝光量，长期没有曝光会 403 暂停免费额度（0.6.19 起被拦时返回 HTTP 200 包着「out of date」假响应，`prompt_tokens: 0`）。Worker 每次 chat 前自动模拟 CLI 的 banner 曝光上报（同 session 绑定）；如仍触发，跑一次官方 CLI 即可。
 - **并发 = 1**：上游按账号强制单并发，第二条并发请求返回 429 `{code: concurrent}`。账号最多 4 个 CLI 会话坑，占满返回 `concurrent_session`（HTTP 409 或 429，Worker 自动 reset 重试一次）。
 - **日额度**：15000 credits ≈ $1.125/天（按 token 折算扣），UTC 零点重置；`/v1/usage` 可查。
 - **JWT 90 天有效**：过期后重新走「获取 token」流程；token 是一次性发放，丢失只能重新授权。

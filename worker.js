@@ -159,9 +159,26 @@ function freepiHeaders(token) {
   if (!token) throw new Error('no free-pi token in the pool');
   return {
     'Authorization': 'Bearer ' + token,
-    'x-session-id': sessionId(),
-    'x-client-version': '0.6.16',
+    // one session per worker lifetime, like one CLI session; the ads gate
+    // tracks impressions per session, so ads and chat must share this id
+    'x-session-id': SESSION_ID,
+    'x-client-version': '0.6.19',
+    // 0.6.19: one uuid per turn on the provider request; without it the
+    // upstream answers with a fake "out of date" completion instead of 426
+    'x-turn-id': TURN_ID,
   };
+}
+
+// what the 0.6.18 CLI sends on its ads requests: os / arch / locale /
+// timezone fingerprint headers (only /ads/next carries them upstream)
+function fingerprintHeaders(extra) {
+  let tz = 'UTC', locale = 'en-US';
+  try {
+    const o = Intl.DateTimeFormat().resolvedOptions();
+    if (o.timeZone) tz = o.timeZone;
+    if (o.locale) locale = o.locale;
+  } catch {}
+  return { ...extra, 'x-client-os': 'linux', 'x-client-arch': 'x64', 'x-client-locale': locale, 'x-client-timezone': tz, 'x-session-id': SESSION_ID, 'x-turn-id': TURN_ID };
 }
 
 // The account pool. FREEPI_TOKENS is the list form — one secret holding
@@ -210,6 +227,9 @@ function sessionId() {
   if (!SESSION_ID) SESSION_ID = crypto.randomUUID();
   return SESSION_ID;
 }
+// one uuid per turn, refreshed at the start of each sendWithGates call so
+// the ads requests and the chat request share the same turn id
+let TURN_ID = null;
 
 // ads gate: upstream pauses an account whose ad impressions went stale
 // ("ads aren't showing for this account"). Serving one impression pair
@@ -221,14 +241,19 @@ function sessionId() {
 async function warmAds(token) {
   try {
     const next = await fetch('https://api.freepi.ai/ads/next?slot=banner', {
-      headers: { 'Authorization': 'Bearer ' + token },
+      headers: fingerprintHeaders({ 'Authorization': 'Bearer ' + token }),
     });
     if (!next.ok) return;
     const ad = await next.json();
     if (!ad || !ad.ad_id) return;
+    // the CLI fires the gravity impression pixel before POSTing; the 0.6.19
+    // gate checks that the session actually loaded the ad
+    if (ad.imp_url && ad.imp_url.includes('trygravity.')) {
+      await fetch(ad.imp_url, { method: 'GET' }).catch(() => {});
+    }
     await fetch('https://api.freepi.ai/ads/impression', {
       method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'x-session-id': sessionId() },
       body: JSON.stringify({ ad_id: ad.ad_id, click_token: ad.click_token, imp_fired: true }),
     });
   } catch {}
@@ -237,8 +262,14 @@ async function warmAds(token) {
 // one account's chat with every gate answered in place: an ad impression
 // before the request, the ads gate re-warming and asking once more, and
 // the session gate resetting and asking once more
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function sendWithGates(token, body) {
+  TURN_ID = crypto.randomUUID();
   await warmAds(token);
+  // the upstream records impressions asynchronously: a chat fired the same
+  // instant still reads the session as ad-less, so give the record a beat
+  await sleep(400);
   let res = await chatFetch(token, body);
   if (res.status === 403) {
     const probe = await res.text();
@@ -247,6 +278,17 @@ async function sendWithGates(token, body) {
       res = await chatFetch(token, body);
     } else {
       res = new Response(probe, { status: res.status, headers: res.headers });
+    }
+  }
+  // 0.6.19+: a tripped ads gate can answer 200 with a fake "out of
+  // date" completion (prompt_tokens 0). JSON-only check — never read a
+  // streaming body. Rewarm, wait, ask once more.
+  if (res.status === 200 && !(res.headers.get('content-type') || '').includes('text/event-stream')) {
+    const probe = await res.clone().text();
+    if (probe.includes('"prompt_tokens":0') && probe.includes('shows ads')) {
+      await warmAds(token);
+      await sleep(800);
+      res = await chatFetch(token, body);
     }
   }
   if (res.status === 409 || res.status === 429) {
